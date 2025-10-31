@@ -6,7 +6,6 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using Debug = UnityEngine.Debug;
-using System.Threading;
 
 [RequireComponent(typeof(Camera))]
 public class TransparentWindow : MonoBehaviour
@@ -31,15 +30,7 @@ public class TransparentWindow : MonoBehaviour
 
     [Tooltip("The framerate the overlay should try to run at")] //
     [SerializeField] int targetFrameRate = 30;
-    
-    private static long _isForceHidden = 0;
 
-    // 이 부분(IsForceHidden 속성)은 수정할 필요 없습니다.
-    // _isForceHidden이 long이 되면서 Interlocked.Read가 정상 작동합니다.
-    public static bool IsForceHidden
-    {
-        get { return Interlocked.Read(ref _isForceHidden) == 1; }
-    }
 
     /////////////////////
     //Windows DLL stuff//
@@ -69,12 +60,6 @@ public class TransparentWindow : MonoBehaviour
     [DllImport("Dwmapi.dll")]
     static extern uint DwmExtendFrameIntoClientArea(IntPtr hWnd, ref Rectangle margins);
 
-    // ◀◀◀ [추가 2] SystemTrayController와의 연동을 위해 필요한 API
-    [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-
-
     const int GWL_STYLE = -16;
     const uint WS_POPUP = 0x80000000;
     const uint WS_VISIBLE = 0x10000000;
@@ -83,16 +68,13 @@ public class TransparentWindow : MonoBehaviour
     const int WM_SYSCOMMAND = 0x112;
     const int WM_MOUSE_MOVE = 0xF012;
 
-    // ◀◀◀ [추가 3] ShowWindowAsync를 위한 상수
-    public const int SW_HIDE = 0;
-    public const int SW_SHOWNORMAL = 1;
-
     int fWidth;
     int fHeight;
     IntPtr hwnd = IntPtr.Zero;
     Rectangle margins;
     Rectangle windowRect;
 
+    //BUG: Sometimes fails to SetResolution if not focused on startup - if using Start(), WindowBoundsCollider2D sometimes fails to set the correct size
     void Awake()
     {
         Main = this;
@@ -112,20 +94,19 @@ public class TransparentWindow : MonoBehaviour
         Application.runInBackground = true;
 
 #if !UNITY_EDITOR
-        fWidth = screenResolution.x;
-        fHeight = screenResolution.y;
-        margins = new Rectangle() { Left = -1 };
-        hwnd = GetActiveWindow(); // ◀ hwnd가 여기서 설정됩니다.
+		fWidth = screenResolution.x;
+		fHeight = screenResolution.y;
+		margins = new Rectangle() {Left = -1};
+		hwnd = GetActiveWindow();
 
-        if (!GetWindowRect(hwnd, out windowRect)) // ◀ ! (not) 연산자 추가 (GetWindowRect는 성공 시 true 반환)
-        {
-            // 성공 시 0이 아닌 값을 반환하므로, ! (not) 을 붙여 실패했을 때(0) 로그를 남기도록 수정
-            Debug.Log("GetWindowRect 성공 (초기 위치 설정)");
-        }
+		if (GetWindowRect(hwnd, out windowRect))
+		{
+			Debug.LogError("Couldn't get Window Rect");
+		}
 
-        SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-        SetWindowPos(hwnd, HWND_TOPMOST, windowRect.Left, windowRect.Top, fWidth, fHeight, 32 | 64);
-        DwmExtendFrameIntoClientArea(hwnd, ref margins);
+		SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+		SetWindowPos(hwnd, HWND_TOPMOST, windowRect.Left, windowRect.Top, fWidth, fHeight, 32 | 64);
+		DwmExtendFrameIntoClientArea(hwnd, ref margins);
 #endif
     }
 
@@ -136,45 +117,9 @@ public class TransparentWindow : MonoBehaviour
             SystemInput.Process();
         }
 
-        // [3. 수정] 스레드 안전하게 값을 읽어옵니다.
-        if (Interlocked.Read(ref _isForceHidden) == 1)
-        {
-            return;
-        }
-
         SetClickThrough();
     }
 
-    // ◀◀◀ [4. 교체] ToggleVisibility 로직 전체를 스레드 안전하게 변경
-    public static void ToggleVisibility()
-    {
-        if (Main == null || Main.hwnd == IntPtr.Zero)
-        {
-            Debug.LogWarning("[Window] ToggleVisibility: TransparentWindow가 아직 준비되지 않았습니다.");
-            return;
-        }
-
-        // ◀◀◀ [수정] 'int'를 'long'으로 변경
-        long currentState = Interlocked.Read(ref _isForceHidden);
-
-        // ◀◀◀ [수정] 'int'를 'long'으로 변경
-        long newState = 1 - currentState;
-
-        Interlocked.Exchange(ref _isForceHidden, newState);
-
-        if (newState == 1) // 1 = 숨김
-        {
-            ShowWindowAsync(Main.hwnd, SW_HIDE);
-            Debug.Log("[Window] 강제 숨김 (비활성화)");
-        }
-        else // 0 = 표시
-        {
-            ShowWindowAsync(Main.hwnd, SW_SHOWNORMAL);
-            BringWindowToTop(Main.hwnd);
-            SetForegroundWindow(Main.hwnd);
-            Debug.Log("[Window] 강제 표시 (활성화)");
-        }
-    }
     //Returns true if the cursor is over a UI element or 2D physics object
     bool FocusForInput()
     {
@@ -196,31 +141,31 @@ public class TransparentWindow : MonoBehaviour
         GetWindowRect(hwnd, out windowRect);
 
 #if !UNITY_EDITOR
-        if (focusWindow)
-        {
-            SetWindowLong(hwnd, -20, ~(((uint)524288) | ((uint)32)));
-            SetWindowPos(hwnd, HWND_TOPMOST, windowRect.Left, windowRect.Top, fWidth, fHeight, 32 | 64);
-        }
-        else
-        {
-            SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-            SetWindowLong(hwnd, -20, (uint)524288 | (uint)32);
-            SetLayeredWindowAttributes(hwnd, 0, 255, 2);
-            SetWindowPos(hwnd, HWND_TOPMOST, windowRect.Left, windowRect.Top, fWidth, fHeight, 32 | 64);
-        }
+		if (focusWindow)
+		{
+			SetWindowLong (hwnd, -20, ~(((uint)524288) | ((uint)32)));
+			SetWindowPos(hwnd, HWND_TOPMOST, windowRect.Left, windowRect.Top, fWidth, fHeight, 32 | 64);
+		}
+		else
+		{
+			SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+			SetWindowLong (hwnd, -20, (uint)524288 | (uint)32);
+			SetLayeredWindowAttributes (hwnd, 0, 255, 2);
+			SetWindowPos(hwnd, HWND_TOPMOST, windowRect.Left, windowRect.Top, fWidth, fHeight, 32 | 64);
+		}
 #endif
     }
 
     public static void DragWindow()
     {
 #if !UNITY_EDITOR
-        if (Screen.fullScreenMode != FullScreenMode.Windowed)
-        {
-            return;
-        }
-        ReleaseCapture();
-        SendMessage(Main.hwnd, WM_SYSCOMMAND, WM_MOUSE_MOVE, 0);
-        Input.ResetInputAxes();
+		if (Screen.fullScreenMode != FullScreenMode.Windowed)
+		{
+			return;
+		}
+		ReleaseCapture ();
+		SendMessage(Main.hwnd, WM_SYSCOMMAND, WM_MOUSE_MOVE, 0);
+		Input.ResetInputAxes();
 #endif
     }
 
