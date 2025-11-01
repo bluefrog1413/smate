@@ -497,7 +497,7 @@ MonoBehaviour:
   maxMoveTime: 4
   changeYDirectionChance: 0.5
   sighChance: 0.3
-  sighDuration: 2
+  sighDuration: 5
 --- !u!95 &1793924480
 Animator:
   serializedVersion: 7
